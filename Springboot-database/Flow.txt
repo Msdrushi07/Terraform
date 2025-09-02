@@ -1,0 +1,195 @@
+Perfect 🚀 Let’s extend our Terraform demo into a mini real-world Spring Boot + RDS setup.
+
+We’ll follow the what → why → how approach.
+
+
+---
+
+🔹 What We’ll Build
+
+VPC → custom network
+
+Public Subnet → for EC2 (Spring Boot app)
+
+Private Subnet → for RDS (MySQL DB)
+
+Internet Gateway + Route Table → so EC2 can talk to internet
+
+Security Groups →
+
+EC2: allow SSH (22), HTTP (8080)
+
+RDS: allow only MySQL (3306) from EC2
+
+
+
+
+---
+
+🔹 Why This Setup
+
+EC2 in public subnet → so we can SSH + access app via browser.
+
+RDS in private subnet → hidden from internet, improves security.
+
+Both in same VPC → they can communicate internally.
+
+
+
+---
+
+🔹 Full Terraform Code
+
+provider "aws" {
+  region = "us-east-1"
+}
+
+# ---------------- VPC ----------------
+resource "aws_vpc" "my_vpc" {
+  cidr_block = "10.0.0.0/16"
+}
+
+# Public Subnet
+resource "aws_subnet" "public" {
+  vpc_id                  = aws_vpc.my_vpc.id
+  cidr_block              = "10.0.1.0/24"
+  availability_zone       = "us-east-1a"
+  map_public_ip_on_launch = true
+}
+
+# Private Subnet
+resource "aws_subnet" "private" {
+  vpc_id            = aws_vpc.my_vpc.id
+  cidr_block        = "10.0.2.0/24"
+  availability_zone = "us-east-1a"
+}
+
+# Internet Gateway
+resource "aws_internet_gateway" "gw" {
+  vpc_id = aws_vpc.my_vpc.id
+}
+
+# Route Table for Public Subnet
+resource "aws_route_table" "public_rt" {
+  vpc_id = aws_vpc.my_vpc.id
+
+  route {
+    cidr_block = "0.0.0.0/0"
+    gateway_id = aws_internet_gateway.gw.id
+  }
+}
+
+# Associate Route Table with Public Subnet
+resource "aws_route_table_association" "public_assoc" {
+  subnet_id      = aws_subnet.public.id
+  route_table_id = aws_route_table.public_rt.id
+}
+
+# ---------------- Security Groups ----------------
+# EC2 Security Group
+resource "aws_security_group" "ec2_sg" {
+  vpc_id = aws_vpc.my_vpc.id
+
+  ingress {
+    from_port   = 22
+    to_port     = 22
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  ingress {
+    from_port   = 8080
+    to_port     = 8080
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+}
+
+# RDS Security Group (only allow EC2 SG)
+resource "aws_security_group" "rds_sg" {
+  vpc_id = aws_vpc.my_vpc.id
+
+  ingress {
+    from_port       = 3306
+    to_port         = 3306
+    protocol        = "tcp"
+    security_groups = [aws_security_group.ec2_sg.id]
+  }
+}
+
+# ---------------- EC2 Instance ----------------
+resource "aws_instance" "springboot" {
+  ami           = "ami-0c02fb55956c7d316" # Amazon Linux 2
+  instance_type = "t2.micro"
+  subnet_id     = aws_subnet.public.id
+  key_name      = "my-key"
+  vpc_security_group_ids = [aws_security_group.ec2_sg.id]
+
+  tags = {
+    Name = "SpringBootApp"
+  }
+}
+
+# ---------------- RDS MySQL ----------------
+# DB Subnet Group
+resource "aws_db_subnet_group" "db_subnet" {
+  name       = "mydb-subnet-group"
+  subnet_ids = [aws_subnet.private.id]
+
+  tags = {
+    Name = "DBSubnetGroup"
+  }
+}
+
+# RDS Instance
+resource "aws_db_instance" "mydb" {
+  allocated_storage    = 20
+  engine               = "mysql"
+  engine_version       = "8.0"
+  instance_class       = "db.t3.micro"
+  name                 = "mydb"
+  username             = "admin"
+  password             = "password123"
+  skip_final_snapshot  = true
+
+  vpc_security_group_ids = [aws_security_group.rds_sg.id]
+  db_subnet_group_name   = aws_db_subnet_group.db_subnet.id
+
+  tags = {
+    Name = "MyDatabase"
+  }
+}
+
+
+---
+
+🔹 How It Works
+
+1. Spring Boot EC2 runs in public subnet → accessible via SSH (22) + app (8080).
+
+
+2. MySQL RDS runs in private subnet → no internet access, only EC2 can reach it.
+
+
+3. Spring Boot → RDS connection uses the private DB endpoint:
+
+
+
+spring.datasource.url=jdbc:mysql://<rds-endpoint>:3306/mydb
+spring.datasource.username=admin
+spring.datasource.password=password123
+
+
+---
+
+⚡ Now we have a real deployment setup: Spring Boot app in EC2 + MySQL RDS in private subnet.
+
+👉 Do you want me to add an Application Load Balancer (ALB) next, so the app can be accessed on port 80 (instead of 8080) with better scaling?
+
