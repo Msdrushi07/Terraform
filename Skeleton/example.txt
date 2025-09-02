@@ -166,6 +166,265 @@ Whenever you start a new Spring Boot project, just think:
 
 That’s it.
 
+Perfect 🚀 Let’s build a complete Terraform template for a Spring Boot app on EC2 (public subnet) + MySQL RDS (private subnet).
+
+Here’s the full corrected code:
+
+provider "aws" {
+  region = "us-east-1" # change as needed
+}
+
+# ---------------- VPC ----------------
+resource "aws_vpc" "my_vpc" {
+  cidr_block = "10.0.0.0/16"
+  tags = { Name = "MyVPC" }
+}
+
+# ---------------- Subnets ----------------
+resource "aws_subnet" "public" {
+  vpc_id                  = aws_vpc.my_vpc.id
+  cidr_block              = "10.0.1.0/24"
+  availability_zone       = "us-east-1a"
+  map_public_ip_on_launch = true
+  tags = { Name = "PublicSubnet" }
+}
+
+resource "aws_subnet" "private" {
+  vpc_id            = aws_vpc.my_vpc.id
+  cidr_block        = "10.0.2.0/24"
+  availability_zone = "us-east-1a"
+  tags = { Name = "PrivateSubnet" }
+}
+
+# ---------------- Internet Gateway + Route ----------------
+resource "aws_internet_gateway" "igw" {
+  vpc_id = aws_vpc.my_vpc.id
+  tags   = { Name = "MyIGW" }
+}
+
+resource "aws_route_table" "public_rt" {
+  vpc_id = aws_vpc.my_vpc.id
+  route {
+    cidr_block = "0.0.0.0/0"
+    gateway_id = aws_internet_gateway.igw.id
+  }
+  tags = { Name = "PublicRT" }
+}
+
+resource "aws_route_table_association" "public_assoc" {
+  subnet_id      = aws_subnet.public.id
+  route_table_id = aws_route_table.public_rt.id
+}
+
+# ---------------- Security Groups ----------------
+resource "aws_security_group" "ec2_sg" {
+  vpc_id = aws_vpc.my_vpc.id
+  name   = "ec2-sg"
+
+  ingress {
+    from_port   = 22
+    to_port     = 22
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"] # allow SSH
+  }
+
+  ingress {
+    from_port   = 8080
+    to_port     = 8080
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"] # allow Spring Boot
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  tags = { Name = "EC2-SG" }
+}
+
+resource "aws_security_group" "db_sg" {
+  vpc_id = aws_vpc.my_vpc.id
+  name   = "db-sg"
+
+  ingress {
+    from_port       = 3306
+    to_port         = 3306
+    protocol        = "tcp"
+    security_groups = [aws_security_group.ec2_sg.id] # only EC2 can connect
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  tags = { Name = "DB-SG" }
+}
+
+# ---------------- Key Pair ----------------
+resource "aws_key_pair" "mykey" {
+  key_name   = "mykey"
+  public_key = file("~/.ssh/id_rsa.pub") # make sure this file exists
+}
+
+# ---------------- EC2 Instance ----------------
+resource "aws_instance" "app" {
+  ami           = "ami-0c7217cdde317cfec" # Amazon Linux 2 (change if needed)
+  instance_type = "t2.micro"
+  subnet_id     = aws_subnet.public.id
+  key_name      = aws_key_pair.mykey.key_name
+  vpc_security_group_ids = [aws_security_group.ec2_sg.id]
+
+  user_data = <<-EOF
+              #!/bin/bash
+              yum update -y
+              amazon-linux-extras install java-openjdk11 -y
+              cd /home/ec2-user
+              echo "Spring Boot App Setup here" > app.log
+              # Example: wget S3 or copy jar from CodeDeploy later
+              EOF
+
+  tags = { Name = "SpringBootApp" }
+}
+
+# ---------------- RDS Subnet Group ----------------
+resource "aws_db_subnet_group" "db_subnet" {
+  name       = "mydb-subnet-group"
+  subnet_ids = [aws_subnet.private.id]
+
+  tags = { Name = "MyDBSubnetGroup" }
+}
+
+# ---------------- RDS MySQL Instance ----------------
+resource "aws_db_instance" "mydb" {
+  allocated_storage    = 20
+  engine               = "mysql"
+  engine_version       = "8.0"
+  instance_class       = "db.t3.micro"
+  name                 = "mydb"
+  username             = "admin"
+  password             = "password123"
+  skip_final_snapshot  = true
+
+  vpc_security_group_ids = [aws_security_group.db_sg.id]
+  db_subnet_group_name   = aws_db_subnet_group.db_subnet.name
+
+  tags = { Name = "MySQLRDS" }
+}
+
+
+---
+
+🔹 What This Does
+
+1. Creates a VPC with public + private subnet.
+
+
+2. Deploys an EC2 (Spring Boot app) in the public subnet.
+
+
+3. Deploys MySQL RDS in the private subnet.
+
+
+4. Security Groups:
+
+EC2: SSH + 8080 open to world.
+
+DB: only EC2 security group can connect.
+
+
+
+5. EC2 has a user_data script (basic setup, can extend for your app JAR).
+
+
+6. Key pair allows SSH access.
+
+
+
+
+---
+
+✅ With this, you have a production-style architecture (Spring Boot app in public, DB in private).
+
+👉 Rushi, do you want me to extend this by adding output variables (like EC2 public IP, RDS endpoint) so you can directly use them after terraform apply?
+
+
+
+Great choice 👍 Rushi! Having outputs makes it much easier to grab values like EC2 public IP or RDS endpoint after terraform apply.
+
+Here’s the extended Terraform template with outputs:
+
+# ---------------- Outputs ----------------
+
+output "ec2_public_ip" {
+  description = "Public IP of the EC2 instance"
+  value       = aws_instance.app.public_ip
+}
+
+output "ec2_public_dns" {
+  description = "Public DNS of the EC2 instance"
+  value       = aws_instance.app.public_dns
+}
+
+output "rds_endpoint" {
+  description = "RDS Endpoint (hostname:port)"
+  value       = aws_db_instance.mydb.endpoint
+}
+
+output "rds_username" {
+  description = "RDS Master Username"
+  value       = aws_db_instance.mydb.username
+  sensitive   = true
+}
+
+output "rds_database_name" {
+  description = "RDS Database Name"
+  value       = aws_db_instance.mydb.name
+}
+
+
+---
+
+🔹 What Happens Now?
+
+After you run:
+
+terraform apply
+
+You’ll see something like:
+
+ec2_public_ip = 3.92.145.12
+ec2_public_dns = ec2-3-92-145-12.compute-1.amazonaws.com
+rds_endpoint = mydb.xxxxxxxx.us-east-1.rds.amazonaws.com:3306
+rds_username = admin
+rds_database_name = mydb
+
+You can:
+
+SSH into EC2 with:
+
+ssh -i ~/.ssh/id_rsa ec2-user@<ec2_public_ip>
+
+Connect Spring Boot to RDS by putting the RDS endpoint in application.properties:
+
+spring.datasource.url=jdbc:mysql://mydb.xxxxxxxx.us-east-1.rds.amazonaws.com:3306/mydb
+spring.datasource.username=admin
+spring.datasource.password=password123
+
+
+
+
+---
+
+⚡ Next Step: Do you want me to also show how to automatically deploy your Spring Boot JAR onto EC2 via Terraform user_data (instead of manually uploading it)? That way after terraform apply, your app will already be running.
+
+
+
 
 
 
