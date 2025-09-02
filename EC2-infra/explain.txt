@@ -1,0 +1,158 @@
+
+
+
+---
+
+📂 Project: EC2 with Security Group + Key Pair
+
+1️⃣ Folder Structure
+
+terraform-ec2-demo/
+ ├── main.tf
+ ├── variables.tf
+ ├── outputs.tf
+
+
+---
+
+2️⃣ main.tf
+
+provider "aws" {
+  region = var.aws_region
+}
+
+# Create a key pair (you need a local public key file)
+resource "aws_key_pair" "rushi_key" {
+  key_name   = "rushi-key"
+  public_key = file(var.public_key_path) # path to your .pub file
+}
+
+# Create security group to allow SSH (port 22) + HTTP (port 80)
+resource "aws_security_group" "rushi_sg" {
+  name        = "rushi-sg"
+  description = "Allow SSH and HTTP inbound traffic"
+  vpc_id      = "default" # will attach to default VPC
+
+  ingress {
+    description = "SSH"
+    from_port   = 22
+    to_port     = 22
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  ingress {
+    description = "HTTP"
+    from_port   = 80
+    to_port     = 80
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  tags = {
+    Name = "rushi-sg"
+  }
+}
+
+# Launch EC2 instance
+resource "aws_instance" "rushi_ec2" {
+  ami           = var.ami_id
+  instance_type = var.instance_type
+  key_name      = aws_key_pair.rushi_key.key_name
+  vpc_security_group_ids = [aws_security_group.rushi_sg.id]
+
+  tags = {
+    Name = "TerraformEC2Demo"
+  }
+}
+
+
+---
+
+3️⃣ variables.tf
+
+variable "aws_region" {
+  default = "us-east-1"
+}
+
+variable "ami_id" {
+  description = "Amazon Linux 2 AMI ID"
+  default     = "ami-0c55b159cbfafe1f0" # Replace based on region
+}
+
+variable "instance_type" {
+  default = "t2.micro"
+}
+
+variable "public_key_path" {
+  description = "Path to your public key file (.pub)"
+  default     = "~/.ssh/id_rsa.pub"
+}
+
+
+---
+
+4️⃣ outputs.tf
+
+output "ec2_instance_id" {
+  value = aws_instance.rushi_ec2.id
+}
+
+output "ec2_public_ip" {
+  value = aws_instance.rushi_ec2.public_ip
+}
+
+
+---
+
+5️⃣ How to Use
+
+1. Generate an SSH key if you don’t have one:
+
+ssh-keygen -t rsa -b 4096 -f ~/.ssh/id_rsa
+
+This creates id_rsa (private key) and id_rsa.pub (public key).
+
+
+2. Update public_key_path in variables.tf if needed.
+
+
+3. Run:
+
+terraform init
+terraform apply
+
+
+4. Terraform outputs the EC2 public IP.
+
+
+5. SSH into the instance:
+
+ssh -i ~/.ssh/id_rsa ec2-user@<public_ip>
+
+
+
+
+---
+
+✅ Now you’ll have:
+
+Key Pair → lets you SSH securely.
+
+Security Group → opens port 22 (SSH) and 80 (HTTP).
+
+EC2 instance → accessible with your key.
+
+
+
+---
+
+
+
