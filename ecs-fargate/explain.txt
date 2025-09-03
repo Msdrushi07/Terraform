@@ -1,0 +1,564 @@
+Perfect Rushi 🚀 — this is where Terraform becomes super powerful for real Spring Boot deployment.
+Let’s follow your what, why, how approach and then I’ll give you a baseline Terraform structure.
+
+
+---
+
+🔹 Step 1: VPC + Subnets + ECS Cluster
+
+What?
+
+VPC with 2 public + 2 private subnets (multi-AZ).
+
+ECS cluster where Fargate tasks will run.
+
+
+Why?
+
+Public subnets → ALB.
+
+Private subnets → ECS tasks (secure, no public IP).
+
+
+How?
+Terraform resources:
+
+aws_vpc
+
+aws_subnet
+
+aws_internet_gateway, aws_nat_gateway
+
+aws_route_table
+
+aws_ecs_cluster
+
+
+
+---
+
+🔹 Step 2: Fargate Task Definition + Service
+
+What?
+
+Task Definition = “recipe” (Spring Boot Docker image, CPU/memory, env variables).
+
+Service = runs N copies of your task (auto restart, scaling).
+
+
+Why?
+
+Fargate lets you run Spring Boot without managing EC2.
+
+Service ensures HA (at least 2 replicas).
+
+
+How?
+Terraform resources:
+
+aws_ecs_task_definition
+
+aws_ecs_service
+
+
+
+---
+
+🔹 Step 3: ALB, Target Groups, IAM Roles
+
+What?
+
+ALB (public-facing) distributes traffic to ECS tasks.
+
+Target Group registers ECS tasks (IP-based).
+
+IAM Roles let ECS pull image from ECR + send logs to CloudWatch.
+
+
+Why?
+
+ALB provides scaling + SSL termination.
+
+IAM roles provide secure permissions.
+
+
+How?
+Terraform resources:
+
+aws_lb, aws_lb_target_group, aws_lb_listener
+
+aws_iam_role, aws_iam_role_policy_attachment
+
+
+
+---
+
+🔹 Step 4: Organize with Variables, Outputs, and Modules
+
+We’ll break into modules:
+
+project/
+│── main.tf             # Calls modules
+│── variables.tf
+│── outputs.tf
+│── modules/
+    ├── vpc/
+    │   ├── main.tf
+    │   ├── variables.tf
+    │   └── outputs.tf
+    ├── ecs/
+    │   ├── main.tf
+    │   ├── variables.tf
+    │   └── outputs.tf
+    ├── alb/
+    │   ├── main.tf
+    │   ├── variables.tf
+    │   └── outputs.tf
+
+modules/vpc → VPC, subnets, routing.
+
+modules/ecs → ECS cluster, task definition, service.
+
+modules/alb → Load balancer + target groups + listener.
+
+
+
+---
+
+✅ End Goal:
+
+Your Spring Boot Docker image (pushed to ECR) runs on ECS Fargate.
+
+Accessible via ALB (public DNS).
+
+Uses CloudWatch logs.
+
+VPC ensures security (tasks in private subnets).
+
+
+
+---
+
+👉 Do you want me to first give you a single main.tf (all-in-one) to understand the full flow,
+and then we break it into modules for clean structure?
+
+Awesome—here’s a single, self-contained main.tf that does everything in one file:
+
+VPC with 2 public + 2 private subnets (multi-AZ)
+
+IGW + NAT GW + route tables
+
+ECS cluster (Fargate)
+
+Task Definition (Spring Boot container on port 8080) + Service
+
+ALB + Target Group + Listener
+
+IAM roles (task execution)
+
+Security groups
+
+Useful outputs (ALB DNS, etc.)
+
+
+> How to use:
+
+1. Save as main.tf
+
+
+2. Set var.container_image to your image (e.g., xxxxxxxx.dkr.ecr.us-east-1.amazonaws.com/myapp:latest)
+
+
+3. terraform init && terraform apply
+
+
+
+
+
+########################################
+# Provider & Variables
+########################################
+terraform {
+  required_version = ">= 1.5.0"
+  required_providers {
+    aws = {
+      source  = "hashicorp/aws"
+      version = "~> 5.0"
+    }
+  }
+}
+
+provider "aws" {
+  region = "us-east-1"
+}
+
+variable "project" {
+  default = "springboot-ecs-demo"
+}
+
+# Change this to your ECR image (or any public image for testing)
+variable "container_image" {
+  description = "Docker image for the Spring Boot app"
+  type        = string
+  # Example public image for quick test; replace with your ECR image
+  default     = "public.ecr.aws/docker/library/nginx:latest"
+}
+
+variable "container_port" {
+  default = 8080
+}
+
+########################################
+# Networking: VPC, Subnets, IGW, NAT, RTs
+########################################
+resource "aws_vpc" "vpc" {
+  cidr_block           = "10.20.0.0/16"
+  enable_dns_support   = true
+  enable_dns_hostnames = true
+  tags = { Name = "${var.project}-vpc" }
+}
+
+data "aws_availability_zones" "available" {}
+
+# Public subnets (2 AZs)
+resource "aws_subnet" "public_a" {
+  vpc_id                  = aws_vpc.vpc.id
+  cidr_block              = "10.20.1.0/24"
+  availability_zone       = data.aws_availability_zones.available.names[0]
+  map_public_ip_on_launch = true
+  tags = { Name = "${var.project}-public-a" }
+}
+
+resource "aws_subnet" "public_b" {
+  vpc_id                  = aws_vpc.vpc.id
+  cidr_block              = "10.20.2.0/24"
+  availability_zone       = data.aws_availability_zones.available.names[1]
+  map_public_ip_on_launch = true
+  tags = { Name = "${var.project}-public-b" }
+}
+
+# Private subnets (2 AZs)
+resource "aws_subnet" "private_a" {
+  vpc_id            = aws_vpc.vpc.id
+  cidr_block        = "10.20.11.0/24"
+  availability_zone = data.aws_availability_zones.available.names[0]
+  tags = { Name = "${var.project}-private-a" }
+}
+
+resource "aws_subnet" "private_b" {
+  vpc_id            = aws_vpc.vpc.id
+  cidr_block        = "10.20.12.0/24"
+  availability_zone = data.aws_availability_zones.available.names[1]
+  tags = { Name = "${var.project}-private-b" }
+}
+
+# IGW
+resource "aws_internet_gateway" "igw" {
+  vpc_id = aws_vpc.vpc.id
+  tags = { Name = "${var.project}-igw" }
+}
+
+# EIP for NAT
+resource "aws_eip" "nat_eip" {
+  domain = "vpc"
+  tags   = { Name = "${var.project}-nat-eip" }
+}
+
+# NAT in public_a
+resource "aws_nat_gateway" "nat" {
+  allocation_id = aws_eip.nat_eip.id
+  subnet_id     = aws_subnet.public_a.id
+  tags          = { Name = "${var.project}-nat" }
+  depends_on    = [aws_internet_gateway.igw]
+}
+
+# Public route table (to IGW)
+resource "aws_route_table" "public_rt" {
+  vpc_id = aws_vpc.vpc.id
+  route {
+    cidr_block = "0.0.0.0/0"
+    gateway_id = aws_internet_gateway.igw.id
+  }
+  tags = { Name = "${var.project}-public-rt" }
+}
+
+resource "aws_route_table_association" "public_a_assoc" {
+  subnet_id      = aws_subnet.public_a.id
+  route_table_id = aws_route_table.public_rt.id
+}
+resource "aws_route_table_association" "public_b_assoc" {
+  subnet_id      = aws_subnet.public_b.id
+  route_table_id = aws_route_table.public_rt.id
+}
+
+# Private route table (to NAT)
+resource "aws_route_table" "private_rt" {
+  vpc_id = aws_vpc.vpc.id
+  route {
+    cidr_block     = "0.0.0.0/0"
+    nat_gateway_id = aws_nat_gateway.nat.id
+  }
+  tags = { Name = "${var.project}-private-rt" }
+}
+
+resource "aws_route_table_association" "private_a_assoc" {
+  subnet_id      = aws_subnet.private_a.id
+  route_table_id = aws_route_table.private_rt.id
+}
+resource "aws_route_table_association" "private_b_assoc" {
+  subnet_id      = aws_subnet.private_b.id
+  route_table_id = aws_route_table.private_rt.id
+}
+
+########################################
+# Security Groups
+########################################
+# ALB SG: allow HTTP from internet
+resource "aws_security_group" "alb_sg" {
+  name   = "${var.project}-alb-sg"
+  vpc_id = aws_vpc.vpc.id
+
+  ingress {
+    description = "HTTP from anywhere"
+    from_port   = 80
+    to_port     = 80
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+    ipv6_cidr_blocks = ["::/0"]
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+    ipv6_cidr_blocks = ["::/0"]
+  }
+
+  tags = { Name = "${var.project}-alb-sg" }
+}
+
+# ECS tasks SG: allow app port from ALB only
+resource "aws_security_group" "ecs_sg" {
+  name   = "${var.project}-ecs-sg"
+  vpc_id = aws_vpc.vpc.id
+
+  ingress {
+    description     = "App port from ALB"
+    from_port       = var.container_port
+    to_port         = var.container_port
+    protocol        = "tcp"
+    security_groups = [aws_security_group.alb_sg.id]
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+    ipv6_cidr_blocks = ["::/0"]
+  }
+
+  tags = { Name = "${var.project}-ecs-sg" }
+}
+
+########################################
+# ALB + Target Group + Listener
+########################################
+resource "aws_lb" "alb" {
+  name               = "${var.project}-alb"
+  load_balancer_type = "application"
+  subnets            = [aws_subnet.public_a.id, aws_subnet.public_b.id]
+  security_groups    = [aws_security_group.alb_sg.id]
+  tags               = { Name = "${var.project}-alb" }
+}
+
+resource "aws_lb_target_group" "tg" {
+  name        = "${var.project}-tg"
+  port        = var.container_port
+  protocol    = "HTTP"
+  vpc_id      = aws_vpc.vpc.id
+  target_type = "ip"
+
+  health_check {
+    path                = "/"
+    protocol            = "HTTP"
+    matcher             = "200-399"
+    interval            = 30
+    timeout             = 5
+    healthy_threshold   = 2
+    unhealthy_threshold = 2
+  }
+
+  tags = { Name = "${var.project}-tg" }
+}
+
+resource "aws_lb_listener" "http" {
+  load_balancer_arn = aws_lb.alb.arn
+  port              = 80
+  protocol          = "HTTP"
+
+  default_action {
+    type             = "forward"
+    target_group_arn = aws_lb_target_group.tg.arn
+  }
+}
+
+########################################
+# IAM for ECS Task Execution
+########################################
+data "aws_iam_policy_document" "ecs_task_execution_assume" {
+  statement {
+    actions = ["sts:AssumeRole"]
+    principals {
+      type        = "Service"
+      identifiers = ["ecs-tasks.amazonaws.com"]
+    }
+  }
+}
+
+resource "aws_iam_role" "ecs_task_execution_role" {
+  name               = "${var.project}-ecs-execution-role"
+  assume_role_policy = data.aws_iam_policy_document.ecs_task_execution_assume.json
+}
+
+resource "aws_iam_role_policy_attachment" "ecs_exec_attach" {
+  role       = aws_iam_role.ecs_task_execution_role.name
+  # Allows pulling from ECR, writing logs to CloudWatch, etc.
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
+}
+
+########################################
+# CloudWatch Logs
+########################################
+resource "aws_cloudwatch_log_group" "app" {
+  name              = "/ecs/${var.project}"
+  retention_in_days = 7
+}
+
+########################################
+# ECS Cluster, Task Definition, Service (Fargate)
+########################################
+resource "aws_ecs_cluster" "cluster" {
+  name = "${var.project}-cluster"
+  setting {
+    name  = "containerInsights"
+    value = "enabled"
+  }
+  tags = { Name = "${var.project}-cluster" }
+}
+
+# Container definition (port 8080 by default)
+locals {
+  container_name = "app"
+  container_definitions = jsonencode([
+    {
+      name      = local.container_name
+      image     = var.container_image
+      essential = true
+      portMappings = [
+        {
+          containerPort = var.container_port
+          hostPort      = var.container_port
+          protocol      = "tcp"
+        }
+      ]
+      logConfiguration = {
+        logDriver = "awslogs"
+        options = {
+          awslogs-group         = aws_cloudwatch_log_group.app.name
+          awslogs-region        = var.region != null ? var.region : "us-east-1"
+          awslogs-stream-prefix = "ecs"
+        }
+      }
+      environment = [
+        # Example: pass DB URL, etc.
+        # { name = "SPRING_PROFILES_ACTIVE", value = "prod" }
+      ]
+    }
+  ])
+}
+
+# Helper region variable for logs (optional)
+variable "region" {
+  default = "us-east-1"
+}
+
+resource "aws_ecs_task_definition" "task" {
+  family                   = "${var.project}-task"
+  cpu                      = "512"   # 0.5 vCPU
+  memory                   = "1024"  # 1 GB
+  network_mode             = "awsvpc"
+  requires_compatibilities = ["FARGATE"]
+
+  execution_role_arn = aws_iam_role.ecs_task_execution_role.arn
+  task_role_arn      = aws_iam_role.ecs_task_execution_role.arn
+
+  container_definitions = local.container_definitions
+
+  runtime_platform {
+    operating_system_family = "LINUX"
+    cpu_architecture        = "X86_64"
+  }
+
+  tags = { Name = "${var.project}-taskdef" }
+}
+
+resource "aws_ecs_service" "service" {
+  name            = "${var.project}-svc"
+  cluster         = aws_ecs_cluster.cluster.id
+  task_definition = aws_ecs_task_definition.task.arn
+  desired_count   = 2
+  launch_type     = "FARGATE"
+
+  network_configuration {
+    subnets         = [aws_subnet.private_a.id, aws_subnet.private_b.id]
+    security_groups = [aws_security_group.ecs_sg.id]
+    assign_public_ip = false
+  }
+
+  load_balancer {
+    target_group_arn = aws_lb_target_group.tg.arn
+    container_name   = local.container_name
+    container_port   = var.container_port
+  }
+
+  depends_on = [
+    aws_lb_listener.http
+  ]
+
+  deployment_minimum_healthy_percent = 50
+  deployment_maximum_percent         = 200
+
+  tags = { Name = "${var.project}-service" }
+}
+
+########################################
+# Outputs
+########################################
+output "alb_dns_name" {
+  description = "Public URL (HTTP) of the ALB"
+  value       = aws_lb.alb.dns_name
+}
+
+output "ecs_cluster_name" {
+  value = aws_ecs_cluster.cluster.name
+}
+
+output "ecs_service_name" {
+  value = aws_ecs_service.service.name
+}
+
+Notes
+
+Replace var.container_image with your ECR image for the Spring Boot app (listens on 8080 by default). If your app listens on a different port, change var.container_port and the target group/listener mapping will follow.
+
+Tasks run in private subnets (no public IP). The ALB lives in public subnets and forwards traffic to tasks.
+
+Logs stream to CloudWatch Logs at /ecs/${project}.
+
+NAT Gateway enables Fargate tasks to reach the internet for dependencies (e.g., pulling images from public registries, hitting external APIs).
+
+
+Want me to now split this into modules (vpc, alb, ecs) and add a minimal variables.tf/outputs.tf layout so you can reuse it across environments?
+
