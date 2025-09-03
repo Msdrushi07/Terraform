@@ -439,3 +439,164 @@ Controller lets you use Ingress → ALB seamlessly
 
 Do you want me to add that demo app + ingress (Terraform manifest) too?
 
+Great choice Rushi 🚀
+Now let’s extend the EKS Terraform infra with the Ingress Controller (AWS Load Balancer Controller) + a sample Spring Boot Deployment + Service + Ingress.
+
+
+---
+
+🔹 Step 1. Install AWS Load Balancer Controller via Helm (Terraform)
+
+Add this to your main.tf (after cluster creation):
+
+# IAM Policy for Load Balancer Controller
+data "aws_iam_policy_document" "alb_controller" {
+  statement {
+    actions   = ["sts:AssumeRoleWithWebIdentity"]
+    effect    = "Allow"
+    principals {
+      type        = "Federated"
+      identifiers = [module.eks.oidc_provider_arn]
+    }
+    condition {
+      test     = "StringEquals"
+      variable = "${replace(module.eks.oidc_provider, "https://", "")}:sub"
+      values   = ["system:serviceaccount:kube-system:aws-load-balancer-controller"]
+    }
+  }
+}
+
+resource "aws_iam_role" "alb_controller" {
+  name               = "eks-alb-controller"
+  assume_role_policy = data.aws_iam_policy_document.alb_controller.json
+}
+
+resource "aws_iam_role_policy_attachment" "alb_controller_policy" {
+  policy_arn = "arn:aws:iam::aws:policy/ElasticLoadBalancingFullAccess"
+  role       = aws_iam_role.alb_controller.name
+}
+
+# Install ALB Controller via Helm
+resource "helm_release" "alb_controller" {
+  name       = "aws-load-balancer-controller"
+  repository = "https://aws.github.io/eks-charts"
+  chart      = "aws-load-balancer-controller"
+  namespace  = "kube-system"
+
+  set {
+    name  = "clusterName"
+    value = module.eks.cluster_name
+  }
+
+  set {
+    name  = "serviceAccount.create"
+    value = "false"
+  }
+
+  set {
+    name  = "serviceAccount.name"
+    value = "aws-load-balancer-controller"
+  }
+}
+
+This will install the Ingress Controller that lets you use AWS ALB with Kubernetes.
+
+
+---
+
+🔹 Step 2. Spring Boot Deployment + Service
+
+Create a file springboot-app.yaml (to be applied with kubectl apply -f):
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: springboot-app
+  labels:
+    app: springboot
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: springboot
+  template:
+    metadata:
+      labels:
+        app: springboot
+    spec:
+      containers:
+        - name: springboot
+          image: your-dockerhub-username/springboot-app:latest
+          ports:
+            - containerPort: 8080
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: springboot-service
+spec:
+  selector:
+    app: springboot
+  ports:
+    - port: 80
+      targetPort: 8080
+  type: NodePort
+
+
+---
+
+🔹 Step 3. Ingress (Expose via ALB)
+
+Create ingress.yaml:
+
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: springboot-ingress
+  annotations:
+    kubernetes.io/ingress.class: alb
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    alb.ingress.kubernetes.io/target-type: ip
+spec:
+  rules:
+    - host: springboot-demo.mydomain.com   # Replace with Route53 DNS
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: springboot-service
+                port:
+                  number: 80
+
+
+---
+
+🔹 Step 4. Deploy App
+
+Once Terraform infra is ready:
+
+kubectl apply -f springboot-app.yaml
+kubectl apply -f ingress.yaml
+
+
+---
+
+🔹 Flow
+
+1. User hits springboot-demo.mydomain.com
+
+
+2. ALB → EKS Ingress → Service → Pod (Spring Boot app).
+
+
+
+
+---
+
+✅ Now you have end-to-end EKS infra with ALB + Spring Boot app.
+
+Would you like me to extend this further by adding an RDS (MySQL) + Secrets Manager integration, so your Spring Boot app connects to a real DB inside the same VPC?
+
+
