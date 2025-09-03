@@ -568,7 +568,7 @@ spec:
               service:
                 name: springboot-service
                 port:
-                  number: 80
+                  number: 8080 #must match container port exposed in service
 
 
 ---
