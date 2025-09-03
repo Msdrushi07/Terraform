@@ -1,0 +1,160 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: springboot-app
+  labels:
+    app: springboot-app
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: springboot-app
+  template:
+    metadata:
+      labels:
+        app: springboot-app
+    spec:
+      containers:
+        - name: springboot-app
+          image: your-dockerhub-username/springboot-app:latest # Replace with your Docker image
+          ports:
+            - containerPort: 8080
+          env:
+            - name: SPRING_PROFILES_ACTIVE
+              value: prod
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: springboot-app-service
+spec:
+  type: ClusterIP
+  selector:
+    app: springboot-app
+  ports:
+    - port: 8080
+      targetPort: 8080
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: springboot-app-ingress
+  annotations:
+    kubernetes.io/ingress.class: alb
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    alb.ingress.kubernetes.io/target-type: ip
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTP":80}]'
+    # Uncomment if you have an ACM cert for HTTPS
+    # alb.ingress.kubernetes.io/certificate-arn: arn:aws:acm:us-east-1:123456789012:certificate/abcd1234-efgh5678
+spec:
+  rules:
+    - http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: springboot-app-service
+                port:
+                  number: 8080
+
+
+Great 🚀 here’s a full manifest (Deployment + Service + Ingress) for running a Spring Boot app in EKS with ALB Ingress Controller:
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: springboot-app
+  labels:
+    app: springboot-app
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: springboot-app
+  template:
+    metadata:
+      labels:
+        app: springboot-app
+    spec:
+      containers:
+        - name: springboot-app
+          image: your-dockerhub-username/springboot-app:latest # Replace with your Docker image
+          ports:
+            - containerPort: 8080
+          env:
+            - name: SPRING_PROFILES_ACTIVE
+              value: prod
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: springboot-app-service
+spec:
+  type: ClusterIP
+  selector:
+    app: springboot-app
+  ports:
+    - port: 8080
+      targetPort: 8080
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: springboot-app-ingress
+  annotations:
+    kubernetes.io/ingress.class: alb
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    alb.ingress.kubernetes.io/target-type: ip
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTP":80}]'
+    # Uncomment if you have an ACM cert for HTTPS
+    # alb.ingress.kubernetes.io/certificate-arn: arn:aws:acm:us-east-1:123456789012:certificate/abcd1234-efgh5678
+spec:
+  rules:
+    - http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: springboot-app-service
+                port:
+                  number: 8080
+
+
+---
+
+🔹 Steps to Deploy
+
+1. Build & push your Docker image
+
+docker build -t your-dockerhub-username/springboot-app:latest .
+docker push your-dockerhub-username/springboot-app:latest
+
+
+2. Apply the manifest
+
+kubectl apply -f springboot-app.yaml
+
+
+3. Verify resources
+
+kubectl get pods
+kubectl get svc
+kubectl get ingress
+
+
+4. Access your app
+
+kubectl get ingress springboot-app-ingress → you’ll see the ALB DNS name.
+
+Open that in a browser → your Spring Boot app should be accessible.
+
+
+
+
+
+---
+
+👉 Do you want me to also include a private RDS (MySQL) Terraform config + Secrets Manager integration, so this Spring Boot app connects to a real DB inside your VPC? That would make it a production-style setup.
+
