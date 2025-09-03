@@ -1,0 +1,441 @@
+Got it 👍 You want the EKS cluster setup without using the terraform-aws-modules — all resources written explicitly (like we did for ECS earlier).
+
+This will be longer, but it’s very useful for understanding what the modules actually do under the hood.
+
+
+---
+
+📂 Project Structure
+
+terraform-eks/
+│── main.tf
+│── variables.tf
+│── outputs.tf
+
+
+---
+
+🔹 main.tf (no modules, full inline)
+
+provider "aws" {
+  region = "us-east-1"
+}
+
+# -----------------------
+# 1. VPC
+# -----------------------
+resource "aws_vpc" "eks_vpc" {
+  cidr_block           = "10.0.0.0/16"
+  enable_dns_support   = true
+  enable_dns_hostnames = true
+
+  tags = {
+    Name = "eks-vpc"
+  }
+}
+
+# Public Subnets
+resource "aws_subnet" "public_a" {
+  vpc_id                  = aws_vpc.eks_vpc.id
+  cidr_block              = "10.0.1.0/24"
+  availability_zone       = "us-east-1a"
+  map_public_ip_on_launch = true
+  tags = { Name = "eks-public-a" }
+}
+
+resource "aws_subnet" "public_b" {
+  vpc_id                  = aws_vpc.eks_vpc.id
+  cidr_block              = "10.0.2.0/24"
+  availability_zone       = "us-east-1b"
+  map_public_ip_on_launch = true
+  tags = { Name = "eks-public-b" }
+}
+
+# Private Subnets
+resource "aws_subnet" "private_a" {
+  vpc_id            = aws_vpc.eks_vpc.id
+  cidr_block        = "10.0.3.0/24"
+  availability_zone = "us-east-1a"
+  tags = { Name = "eks-private-a" }
+}
+
+resource "aws_subnet" "private_b" {
+  vpc_id            = aws_vpc.eks_vpc.id
+  cidr_block        = "10.0.4.0/24"
+  availability_zone = "us-east-1b"
+  tags = { Name = "eks-private-b" }
+}
+
+# Internet Gateway
+resource "aws_internet_gateway" "igw" {
+  vpc_id = aws_vpc.eks_vpc.id
+  tags   = { Name = "eks-igw" }
+}
+
+# Public Route Table
+resource "aws_route_table" "public_rt" {
+  vpc_id = aws_vpc.eks_vpc.id
+  route {
+    cidr_block = "0.0.0.0/0"
+    gateway_id = aws_internet_gateway.igw.id
+  }
+  tags = { Name = "eks-public-rt" }
+}
+
+# Associate Public Subnets with Route Table
+resource "aws_route_table_association" "public_assoc_a" {
+  subnet_id      = aws_subnet.public_a.id
+  route_table_id = aws_route_table.public_rt.id
+}
+resource "aws_route_table_association" "public_assoc_b" {
+  subnet_id      = aws_subnet.public_b.id
+  route_table_id = aws_route_table.public_rt.id
+}
+
+# -----------------------
+# 2. IAM Roles
+# -----------------------
+# EKS Cluster Role
+resource "aws_iam_role" "eks_cluster_role" {
+  name = "eks-cluster-role"
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect = "Allow"
+      Principal = { Service = "eks.amazonaws.com" }
+      Action = "sts:AssumeRole"
+    }]
+  })
+}
+resource "aws_iam_role_policy_attachment" "eks_cluster_role_policy" {
+  role       = aws_iam_role.eks_cluster_role.name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonEKSClusterPolicy"
+}
+
+# EKS Node Role
+resource "aws_iam_role" "eks_node_role" {
+  name = "eks-node-role"
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect = "Allow"
+      Principal = { Service = "ec2.amazonaws.com" }
+      Action = "sts:AssumeRole"
+    }]
+  })
+}
+resource "aws_iam_role_policy_attachment" "eks_worker_policies" {
+  for_each = toset([
+    "arn:aws:iam::aws:policy/AmazonEKSWorkerNodePolicy",
+    "arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly",
+    "arn:aws:iam::aws:policy/AmazonEKS_CNI_Policy"
+  ])
+  role       = aws_iam_role.eks_node_role.name
+  policy_arn = each.value
+}
+
+# -----------------------
+# 3. EKS Cluster
+# -----------------------
+resource "aws_eks_cluster" "eks" {
+  name     = "demo-eks"
+  role_arn = aws_iam_role.eks_cluster_role.arn
+
+  vpc_config {
+    subnet_ids = [
+      aws_subnet.public_a.id,
+      aws_subnet.public_b.id,
+      aws_subnet.private_a.id,
+      aws_subnet.private_b.id
+    ]
+  }
+
+  depends_on = [aws_iam_role_policy_attachment.eks_cluster_role_policy]
+}
+
+# Auth Data (for kubectl)
+data "aws_eks_cluster_auth" "eks" {
+  name = aws_eks_cluster.eks.name
+}
+
+# -----------------------
+# 4. Node Group
+# -----------------------
+resource "aws_eks_node_group" "eks_nodes" {
+  cluster_name    = aws_eks_cluster.eks.name
+  node_group_name = "eks-node-group"
+  node_role_arn   = aws_iam_role.eks_node_role.arn
+
+  subnet_ids = [
+    aws_subnet.public_a.id,
+    aws_subnet.public_b.id
+  ]
+
+  scaling_config {
+    desired_size = 2
+    max_size     = 3
+    min_size     = 1
+  }
+
+  instance_types = ["t3.medium"]
+}
+
+# -----------------------
+# 5. Security Group for ALB
+# -----------------------
+resource "aws_security_group" "alb_sg" {
+  name        = "alb-sg"
+  description = "Allow HTTP and HTTPS"
+  vpc_id      = aws_vpc.eks_vpc.id
+
+  ingress {
+    description = "HTTP"
+    from_port   = 80
+    to_port     = 80
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  ingress {
+    description = "HTTPS"
+    from_port   = 443
+    to_port     = 443
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  tags = {
+    Name = "alb-sg"
+  }
+}
+
+
+---
+
+🔹 outputs.tf
+
+output "cluster_name" {
+  value = aws_eks_cluster.eks.name
+}
+
+output "cluster_endpoint" {
+  value = aws_eks_cluster.eks.endpoint
+}
+
+output "cluster_ca" {
+  value = aws_eks_cluster.eks.certificate_authority[0].data
+}
+
+
+---
+
+🔹 Usage
+
+terraform init
+terraform apply -auto-approve
+
+aws eks update-kubeconfig --name demo-eks --region us-east-1
+kubectl get nodes
+
+
+---
+
+✅ This version:
+
+Creates VPC, subnets, IGW, route tables
+
+Creates IAM roles
+
+Creates EKS cluster + managed node group
+
+Adds security group for ALB
+
+
+No external modules are used — everything is explicit.
+
+
+---
+
+👉 Do you want me to also add the Helm provider + AWS Load Balancer Controller installation inline (so that Ingress → ALB works), or should we stop at EKS cluster + nodes for now?
+
+Perfect 👍 Let’s extend our EKS Terraform setup (without modules) to also install:
+
+1. Helm provider → so Terraform can install Helm charts
+
+
+2. IAM role & policy for AWS Load Balancer Controller
+
+
+3. Helm release for AWS Load Balancer Controller → required for Ingress → ALB
+
+
+
+
+---
+
+📂 Updated Project Structure
+
+terraform-eks/
+│── main.tf
+│── variables.tf
+│── outputs.tf
+
+
+---
+
+🔹 main.tf (extended with Helm & ALB Controller)
+
+provider "aws" {
+  region = "us-east-1"
+}
+
+provider "helm" {
+  kubernetes {
+    host                   = aws_eks_cluster.eks.endpoint
+    cluster_ca_certificate = base64decode(aws_eks_cluster.eks.certificate_authority[0].data)
+    token                  = data.aws_eks_cluster_auth.eks.token
+  }
+}
+
+# -----------------------
+# 1. VPC (same as before)
+# -----------------------
+# (keep all your vpc, subnets, igw, route tables from previous config)
+
+# -----------------------
+# 2. IAM Roles (same as before)
+# -----------------------
+# (cluster role + node role from previous config)
+
+# -----------------------
+# 3. EKS Cluster + Node Group (same as before)
+# -----------------------
+# (eks cluster + eks node group from previous config)
+
+# -----------------------
+# 4. Security Group for ALB (same as before)
+# -----------------------
+
+# -----------------------
+# 5. IAM Policy for Load Balancer Controller
+# -----------------------
+data "http" "alb_iam_policy" {
+  url = "https://raw.githubusercontent.com/kubernetes-sigs/aws-load-balancer-controller/v2.8.0/docs/install/iam_policy.json"
+}
+
+resource "aws_iam_policy" "alb_controller_policy" {
+  name   = "AWSLoadBalancerControllerIAMPolicy"
+  policy = data.http.alb_iam_policy.body
+}
+
+resource "aws_iam_role" "alb_controller_role" {
+  name = "eks-alb-controller-role"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17",
+    Statement = [
+      {
+        Effect = "Allow",
+        Principal = {
+          Service = "ec2.amazonaws.com"
+        },
+        Action = "sts:AssumeRole"
+      }
+    ]
+  })
+}
+
+resource "aws_iam_role_policy_attachment" "alb_controller_attach" {
+  role       = aws_iam_role.alb_controller_role.name
+  policy_arn = aws_iam_policy.alb_controller_policy.arn
+}
+
+# -----------------------
+# 6. Helm Release for AWS Load Balancer Controller
+# -----------------------
+resource "helm_release" "aws_load_balancer_controller" {
+  name       = "aws-load-balancer-controller"
+  namespace  = "kube-system"
+  repository = "https://aws.github.io/eks-charts"
+  chart      = "aws-load-balancer-controller"
+  version    = "1.7.2"
+
+  set {
+    name  = "clusterName"
+    value = aws_eks_cluster.eks.name
+  }
+
+  set {
+    name  = "serviceAccount.create"
+    value = "true"
+  }
+
+  set {
+    name  = "serviceAccount.name"
+    value = "aws-load-balancer-controller"
+  }
+}
+
+
+---
+
+🔹 outputs.tf (same as before)
+
+output "cluster_name" {
+  value = aws_eks_cluster.eks.name
+}
+
+output "cluster_endpoint" {
+  value = aws_eks_cluster.eks.endpoint
+}
+
+output "cluster_ca" {
+  value = aws_eks_cluster.eks.certificate_authority[0].data
+}
+
+
+---
+
+🔹 Steps to Deploy
+
+terraform init
+terraform apply -auto-approve
+
+# update kubeconfig
+aws eks update-kubeconfig --name demo-eks --region us-east-1
+
+# verify controller
+kubectl get pods -n kube-system
+
+You should see:
+
+aws-load-balancer-controller-xxxx Running
+
+
+---
+
+✅ What this setup now does
+
+EKS Cluster + Node Group (no modules)
+
+Security Group for ALB
+
+Installs AWS Load Balancer Controller (via Helm)
+
+Controller lets you use Ingress → ALB seamlessly
+
+
+
+---
+
+👉 Next step could be: deploy a sample NGINX app + Ingress resource in Kubernetes, and Terraform will automatically provision an AWS ALB.
+
+Do you want me to add that demo app + ingress (Terraform manifest) too?
+
