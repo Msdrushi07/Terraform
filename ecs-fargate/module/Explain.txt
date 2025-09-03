@@ -1,0 +1,499 @@
+Perfect 👍 Rushi — let’s refactor the all-in-one ECS on Fargate setup into modular Terraform.
+This is the structure we’ll follow:
+
+project/
+│── main.tf
+│── variables.tf
+│── outputs.tf
+│── terraform.tfvars (optional, env-specific values)
+│── modules/
+    ├── vpc/
+    │   ├── main.tf
+    │   ├── variables.tf
+    │   └── outputs.tf
+    ├── alb/
+    │   ├── main.tf
+    │   ├── variables.tf
+    │   └── outputs.tf
+    └── ecs/
+        ├── main.tf
+        ├── variables.tf
+        └── outputs.tf
+
+
+---
+
+🔹 Root main.tf (calls modules)
+
+provider "aws" {
+  region = var.region
+}
+
+module "vpc" {
+  source  = "./modules/vpc"
+  project = var.project
+}
+
+module "alb" {
+  source  = "./modules/alb"
+  project = var.project
+  vpc_id  = module.vpc.vpc_id
+  public_subnets = module.vpc.public_subnets
+}
+
+module "ecs" {
+  source  = "./modules/ecs"
+  project = var.project
+  vpc_id  = module.vpc.vpc_id
+  private_subnets = module.vpc.private_subnets
+  alb_sg_id       = module.alb.alb_sg_id
+  alb_tg_arn      = module.alb.target_group_arn
+  container_image = var.container_image
+  container_port  = var.container_port
+}
+
+
+---
+
+🔹 Root variables.tf
+
+variable "region" {
+  default = "us-east-1"
+}
+
+variable "project" {
+  default = "springboot-ecs-demo"
+}
+
+variable "container_image" {
+  description = "ECR or public Docker image"
+  type        = string
+  default     = "public.ecr.aws/docker/library/nginx:latest"
+}
+
+variable "container_port" {
+  default = 8080
+}
+
+
+---
+
+🔹 Root outputs.tf
+
+output "alb_dns_name" {
+  value = module.alb.alb_dns_name
+}
+
+output "ecs_cluster_name" {
+  value = module.ecs.ecs_cluster_name
+}
+
+output "ecs_service_name" {
+  value = module.ecs.ecs_service_name
+}
+
+
+---
+
+🔹 Module: modules/vpc/main.tf
+
+resource "aws_vpc" "this" {
+  cidr_block           = "10.20.0.0/16"
+  enable_dns_support   = true
+  enable_dns_hostnames = true
+  tags = { Name = "${var.project}-vpc" }
+}
+
+data "aws_availability_zones" "available" {}
+
+# Public subnets
+resource "aws_subnet" "public_a" {
+  vpc_id                  = aws_vpc.this.id
+  cidr_block              = "10.20.1.0/24"
+  availability_zone       = data.aws_availability_zones.available.names[0]
+  map_public_ip_on_launch = true
+  tags = { Name = "${var.project}-public-a" }
+}
+
+resource "aws_subnet" "public_b" {
+  vpc_id                  = aws_vpc.this.id
+  cidr_block              = "10.20.2.0/24"
+  availability_zone       = data.aws_availability_zones.available.names[1]
+  map_public_ip_on_launch = true
+  tags = { Name = "${var.project}-public-b" }
+}
+
+# Private subnets
+resource "aws_subnet" "private_a" {
+  vpc_id            = aws_vpc.this.id
+  cidr_block        = "10.20.11.0/24"
+  availability_zone = data.aws_availability_zones.available.names[0]
+  tags = { Name = "${var.project}-private-a" }
+}
+
+resource "aws_subnet" "private_b" {
+  vpc_id            = aws_vpc.this.id
+  cidr_block        = "10.20.12.0/24"
+  availability_zone = data.aws_availability_zones.available.names[1]
+  tags = { Name = "${var.project}-private-b" }
+}
+
+# IGW + NAT
+resource "aws_internet_gateway" "igw" {
+  vpc_id = aws_vpc.this.id
+  tags   = { Name = "${var.project}-igw" }
+}
+
+resource "aws_eip" "nat_eip" {
+  domain = "vpc"
+}
+
+resource "aws_nat_gateway" "nat" {
+  allocation_id = aws_eip.nat_eip.id
+  subnet_id     = aws_subnet.public_a.id
+  depends_on    = [aws_internet_gateway.igw]
+}
+
+# Route tables
+resource "aws_route_table" "public_rt" {
+  vpc_id = aws_vpc.this.id
+  route {
+    cidr_block = "0.0.0.0/0"
+    gateway_id = aws_internet_gateway.igw.id
+  }
+}
+
+resource "aws_route_table_association" "public_a" {
+  subnet_id      = aws_subnet.public_a.id
+  route_table_id = aws_route_table.public_rt.id
+}
+resource "aws_route_table_association" "public_b" {
+  subnet_id      = aws_subnet.public_b.id
+  route_table_id = aws_route_table.public_rt.id
+}
+
+resource "aws_route_table" "private_rt" {
+  vpc_id = aws_vpc.this.id
+  route {
+    cidr_block     = "0.0.0.0/0"
+    nat_gateway_id = aws_nat_gateway.nat.id
+  }
+}
+
+resource "aws_route_table_association" "private_a" {
+  subnet_id      = aws_subnet.private_a.id
+  route_table_id = aws_route_table.private_rt.id
+}
+resource "aws_route_table_association" "private_b" {
+  subnet_id      = aws_subnet.private_b.id
+  route_table_id = aws_route_table.private_rt.id
+}
+
+modules/vpc/variables.tf
+
+variable "project" {
+  type = string
+}
+
+modules/vpc/outputs.tf
+
+output "vpc_id" {
+  value = aws_vpc.this.id
+}
+
+output "public_subnets" {
+  value = [aws_subnet.public_a.id, aws_subnet.public_b.id]
+}
+
+output "private_subnets" {
+  value = [aws_subnet.private_a.id, aws_subnet.private_b.id]
+}
+
+
+---
+
+🔹 Module: modules/alb/main.tf
+
+resource "aws_security_group" "alb_sg" {
+  vpc_id = var.vpc_id
+  ingress {
+    from_port   = 80
+    to_port     = 80
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+}
+
+resource "aws_lb" "this" {
+  name               = "${var.project}-alb"
+  load_balancer_type = "application"
+  subnets            = var.public_subnets
+  security_groups    = [aws_security_group.alb_sg.id]
+}
+
+resource "aws_lb_target_group" "tg" {
+  name        = "${var.project}-tg"
+  port        = var.container_port
+  protocol    = "HTTP"
+  vpc_id      = var.vpc_id
+  target_type = "ip"
+}
+
+resource "aws_lb_listener" "http" {
+  load_balancer_arn = aws_lb.this.arn
+  port              = 80
+  protocol          = "HTTP"
+  default_action {
+    type             = "forward"
+    target_group_arn = aws_lb_target_group.tg.arn
+  }
+}
+
+modules/alb/variables.tf
+
+variable "project" {}
+variable "vpc_id" {}
+variable "public_subnets" {
+  type = list(string)
+}
+variable "container_port" {
+  default = 8080
+}
+
+modules/alb/outputs.tf
+
+output "alb_dns_name" {
+  value = aws_lb.this.dns_name
+}
+
+output "alb_sg_id" {
+  value = aws_security_group.alb_sg.id
+}
+
+output "target_group_arn" {
+  value = aws_lb_target_group.tg.arn
+}
+
+
+---
+
+🔹 Module: modules/ecs/main.tf
+
+resource "aws_security_group" "ecs_sg" {
+  vpc_id = var.vpc_id
+  ingress {
+    from_port       = var.container_port
+    to_port         = var.container_port
+    protocol        = "tcp"
+    security_groups = [var.alb_sg_id]
+  }
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+}
+
+resource "aws_cloudwatch_log_group" "app" {
+  name              = "/ecs/${var.project}"
+  retention_in_days = 7
+}
+
+resource "aws_ecs_cluster" "this" {
+  name = "${var.project}-cluster"
+}
+
+data "aws_iam_policy_document" "ecs_task_exec" {
+  statement {
+    actions = ["sts:AssumeRole"]
+    principals {
+      type        = "Service"
+      identifiers = ["ecs-tasks.amazonaws.com"]
+    }
+  }
+}
+
+resource "aws_iam_role" "ecs_task_exec" {
+  name               = "${var.project}-exec-role"
+  assume_role_policy = data.aws_iam_policy_document.ecs_task_exec.json
+}
+
+resource "aws_iam_role_policy_attachment" "ecs_exec_attach" {
+  role       = aws_iam_role.ecs_task_exec.name
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
+}
+
+locals {
+  container_definitions = jsonencode([{
+    name  = "app"
+    image = var.container_image
+    essential = true
+    portMappings = [{
+      containerPort = var.container_port
+      hostPort      = var.container_port
+      protocol      = "tcp"
+    }]
+    logConfiguration = {
+      logDriver = "awslogs"
+      options = {
+        awslogs-group         = aws_cloudwatch_log_group.app.name
+        awslogs-region        = var.region
+        awslogs-stream-prefix = "ecs"
+      }
+    }
+  }])
+}
+
+resource "aws_ecs_task_definition" "task" {
+  family                   = "${var.project}-task"
+  cpu                      = "512"
+  memory                   = "1024"
+  network_mode             = "awsvpc"
+  requires_compatibilities = ["FARGATE"]
+  execution_role_arn       = aws_iam_role.ecs_task_exec.arn
+  container_definitions    = local.container_definitions
+}
+
+resource "aws_ecs_service" "svc" {
+  name            = "${var.project}-svc"
+  cluster         = aws_ecs_cluster.this.id
+  task_definition = aws_ecs_task_definition.task.arn
+  desired_count   = 2
+  launch_type     = "FARGATE"
+
+  network_configuration {
+    subnets         = var.private_subnets
+    security_groups = [aws_security_group.ecs_sg.id]
+    assign_public_ip = false
+  }
+
+  load_balancer {
+    target_group_arn = var.alb_tg_arn
+    container_name   = "app"
+    container_port   = var.container_port
+  }
+}
+
+modules/ecs/variables.tf
+
+variable "project" {}
+variable "vpc_id" {}
+variable "private_subnets" {
+  type = list(string)
+}
+variable "alb_sg_id" {}
+variable "alb_tg_arn" {}
+variable "container_image" {}
+variable "container_port" {
+  default = 8080
+}
+variable "region" {
+  default = "us-east-1"
+}
+
+modules/ecs/outputs.tf
+
+output "ecs_cluster_name" {
+  value = aws_ecs_cluster.this.name
+}
+
+output "ecs_service_name" {
+  value = aws_ecs_service.svc.name
+}
+
+
+---
+
+✅ Now your infra is modular, reusable, and production-like:
+
+Swap terraform.tfvars values for dev/stage/prod.
+
+ALB in public subnets, ECS Fargate in private subnets.
+
+IAM roles, CloudWatch logs, and scaling built-in.
+
+
+
+---
+
+Do you want me to also create a terraform.tfvars example file for dev (with small instances, 1 task) and prod (with bigger instances, 3+ tasks) so you can see environment separation in action?
+
+Great 🚀 Rushi! Let’s create terraform.tfvars examples for dev and prod environments.
+Since we’ve already parameterized region, project, container_image, and container_port, we can just override them per environment.
+
+
+---
+
+🔹 terraform.tfvars for Dev
+
+region          = "us-east-1"
+project         = "springboot-ecs-dev"
+container_image = "public.ecr.aws/docker/library/nginx:latest"
+container_port  = 8080
+
+👉 This will:
+
+Deploy with project name springboot-ecs-dev
+
+Small, default Fargate config (cpu = 512, memory = 1024, desired_count = 2 from module)
+
+Use nginx as demo container.
+
+
+
+---
+
+🔹 terraform.tfvars for Prod
+
+region          = "us-east-1"
+project         = "springboot-ecs-prod"
+container_image = "123456789012.dkr.ecr.us-east-1.amazonaws.com/springboot-app:latest"
+container_port  = 8080
+
+👉 This will:
+
+Deploy with project name springboot-ecs-prod
+
+Use your Spring Boot app Docker image from ECR
+
+Larger Fargate tasks (we can override cpu, memory, and desired_count inside ECS module if needed).
+
+
+
+---
+
+🔹 How to Apply
+
+# For Dev
+terraform apply -var-file="terraform.tfvars"
+
+# Or specify explicitly
+terraform apply -var-file="dev.tfvars"
+
+# For Prod
+terraform apply -var-file="prod.tfvars"
+
+
+---
+
+✅ This way:
+
+Same Terraform code
+
+Different tfvars files for each environment
+
+Clean separation between dev/stage/prod
+
+
+
+---
+
+👉 Rushi, do you want me to also extend the ECS module variables so that you can control cpu, memory, and desired_count per environment (instead of hardcoding 512/1024/2)? That way dev can run 1 small task, prod can run 3 bigger tasks.
+
