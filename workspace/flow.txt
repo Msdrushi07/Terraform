@@ -1,0 +1,105 @@
+cd terraform/
+terraform init
+
+# Create environments
+terraform workspace new dev
+terraform workspace new prod
+
+# Work in dev
+terraform workspace select dev
+terraform plan -var-file=dev.tfvars
+terraform apply -var-file=dev.tfvars
+
+# Switch to prod
+terraform workspace select prod
+terraform plan -var-file=prod.tfvars
+terraform apply -var-file=prod.tfvars
+
+
+Good question, Rushi 👍 — this is exactly where people get confused when they first start with workspaces.
+
+Here’s the right order:
+
+
+---
+
+🔹 1. Initial Setup (one-time per project)
+
+When you create a new Terraform project (with main.tf, variables.tf, etc.):
+
+terraform init
+
+👉 This initializes the backend (local or remote), downloads providers (AWS), etc.
+You must always run init first.
+
+
+---
+
+🔹 2. Workspaces
+
+By default, Terraform gives you a default workspace.
+If you want multiple environments (dev/prod/stage), you create/select workspaces after init:
+
+# List workspaces
+terraform workspace list
+
+# Create a new one
+terraform workspace new dev
+
+# Switch to it
+terraform workspace select dev
+
+👉 Now Terraform will use a separate state file for dev.
+
+
+---
+
+🔹 3. Run Commands
+
+Once you’re in the right workspace:
+
+terraform validate   # checks syntax
+terraform plan       # shows what will be created
+terraform apply      # creates infra in that workspace
+
+If you switch to prod workspace → it uses a different state → no overlap with dev.
+
+
+---
+
+🔹 Example Flow
+
+cd terraform/
+terraform init
+
+# Create environments
+terraform workspace new dev
+terraform workspace new prod
+
+# Work in dev
+terraform workspace select dev
+terraform plan -var-file=dev.tfvars
+terraform apply -var-file=dev.tfvars
+
+# Switch to prod
+terraform workspace select prod
+terraform plan -var-file=prod.tfvars
+terraform apply -var-file=prod.tfvars
+
+
+---
+
+✅ Key Rule:
+
+init always comes first (sets up backend + providers).
+
+Then you create/select workspaces.
+
+Then you plan/apply.
+
+
+
+---
+
+Would you like me to also show how Terraform names the state files internally when using local backend vs S3 backend? That’ll make the workspace behavior very clear.
+
